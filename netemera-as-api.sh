@@ -20,15 +20,20 @@ if $DEBUG; then set -x; fi;
 usage() {
 	cat <<EOF
 Usage:
-	netemera-as-api.sh <mode> <arguments...>
+	netemera-as-api.sh [OPTIONS] <mode> <arguments...>
 
 Modes:
 	application_uplink <app_id>
-	uplink <dev_eui>
-	uplink_hist <dev_eui> <from_time> [<until_time>]
+	uplink <dev_eui> [<from_time>] [<until_time>]
 	downlink <dev_eui> <f_port> <frm_payload> [<confirmed default:false>]
 	downlink_clear <dev_eui>
 	refresh_token
+
+Options:
+	-v   increase loglevel
+	-s   decrese loglevel
+	-c   specify config file to load
+	-h   print this help and exit
 
 Configuration files:
 	/etc/${CONFFILE}
@@ -44,8 +49,8 @@ Configuration variables:
 
 Examples:
 	netemera-as-api.sh uplink ffffffffff00001b
-	netemera-as-api.sh uplink_hist ffffffffff000014 '-7 day'
-	netemera-as-api.sh uplink_hist ffffffffff000014 '-7 day' '-1 day'
+	netemera-as-api.sh uplink ffffffffff000014 -7day
+	netemera-as-api.sh uplink ffffffffff000014 -7day -1day
 	netemera-as-api.sh downlink ffffffffff00001b 1 0101
 	netemera-as-api.sh refresh_token
 
@@ -57,9 +62,13 @@ EOF
 usage_error() { usage >&2; echo; echo "ERROR: $@" >&2; exit 1; }
 debug() { if ${DEBUG:-false}; then echo "$@"; fi; }
 warn() { echo "WARNING:" "$@" >&2; }
-log() { if [ "$1" -le "${LOGLVL}" ]; then shift; echo "@" "$@"; fi; }
+log() { if [ "$1" -le "${LOGLVL}" ]; then shift; echo "@" "$@" >&2; fi; }
 fatal() { echo "FATAL:" "$@" >&2; exit 1; }
-trap_err() { echo "Backtrace is: " >&2; for ((i=0;1;++i));do caller "$i" >&2||break;done;}
+trap_err() {
+	echo "Backtrace is: " >&2; 
+	for ((i=0;1;++i));do caller "$i" >&2||break; done;
+	sed -n $(caller $((i-1))|cut -d' ' -f1)"p" $0;
+}
 trap "trap_err" ERR
 
 tolower() { echo "$@" | tr '[:upper:]' '[:lower:]'; }
@@ -68,6 +77,11 @@ ishexstring() {
 	local tmp
 	tmp="$(sed 's/[[:xdigit:]]*//' <<<"$1")"
 	return "${#tmp}"
+}
+
+curl() {
+	log 10 curl "$@";
+	command curl "$@";
 }
 
 gettoken() {
@@ -142,7 +156,7 @@ ask() {
 	shift
 	gettoken token
 	log 3 "token_length=${#token}"
-	log 1 "Connect" >&2
+	log 1 "Connect"
 	curl -sS \
 		-H "Authorization: Bearer ${token}" \
 		"$@" \
@@ -229,12 +243,30 @@ sse_parse() {
 
 # Main ####################################################
 
-for d in /etc "$HOME/.config"; do
-	if [ -e "$d/$CONFFILE" ]; then
-		log 3 "Loading $d/$CONFFILE ..."
-		. "$d/$CONFFILE"
-	fi
+CMDCONFFILE=""
+while getopts "vsc:h" opt; do
+	case "$opt" in
+	v) ((LOGLVL++)); ;;
+	s) ((LOGLVL--)); ;;
+	h) usage; exit; ;;
+	c) CMDCONFFILE=$OPTARG; ;;
+	*) usage; ;;
+	esac
 done
+shift $((OPTIND-1))
+
+# load configuration file
+if [ -n "$CMDCONFFILE" ]; then
+	log 3 "Loading $CMDCONFFILE"
+	. $CMDCONFFILE
+else
+	for d in /etc "$HOME/.config"; do
+		if [ -e "$d/$CONFFILE" ]; then
+			log 3 "Loading $d/$CONFFILE ..."
+			. "$d/$CONFFILE"
+		fi
+	done
+fi
 
 for i in CLIENT_ID CLIENT_SECRET AUTHORIZATION_HOST APPLICATION_HOST  TOKENFILE; do
 	if eval [ -z "\"\${#$i}\"" ]; then
@@ -259,26 +291,29 @@ application_uplink)
 	ask uplink-packets/applications/$eui \
 		-H 'Accept: text/event-stream' -H 'Cache-Control: no-cache' -m 0
 	;;
-uplink)
-	ask uplink-packets/end-devices/$eui \
-		-H 'Accept: text/event-stream' -H 'Cache-Control: no-cache' -m 0 --no-buffer \
-	| {
-		if ${NO_FILTER:-false}; then 
-			exec cat; 
-		else
-			sse_parse
+uplink|uplink_hist)
+	if [ $# -eq 1 ]; then
+		# uplink
+		ask uplink-packets/end-devices/$eui \
+			-H 'Accept: text/event-stream' -H 'Cache-Control: no-cache' -m 0 --no-buffer \
+		| {
+			if ${NO_FILTER:-false}; then 
+				exec cat; 
+			else
+				sse_parse
+			fi
+		}
+	else
+		# old uplink_hist
+		from_time=$(date --date="$2" -u +%Y-%m-%dT%H:%M:%SZ)
+		str="from_time=${from_time}"
+		if [ $# -ge 3 ]; then
+			until_time=$(date --date="$3" -u +%Y-%m-%dT%H:%M:%SZ)
+			str+="&until_time=${until_time}"
 		fi
-	}
-	;;
-uplink_hist)
-	if [ $# -lt 2 ]; then usage_error "Mode $mode needs two arguments"; fi;
-	from_time=$(date --date="$2" -u +%Y-%m-%dT%H:%M:%SZ)
-	str="from_time=${from_time}"
-	if [ $# -gt 3 ]; then
-		until_time=$(date --date="$3" -u +%Y-%m-%dT%H:%M:%SZ)
-		str+="&until_time=${until_time}"
+		if [ $# -ge 4 ]; then usage_error "Too many arguments for mode=$mode"; fi;
+		ask "uplink-packets/end-devices/$eui?${str}"
 	fi
-	ask "uplink-packets/end-devices/$eui?${str}"
 	;;
 downlink)
 	if [ $# -lt 2 ]; then usage_error "mode $mode needs more arguments"; fi;
