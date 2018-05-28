@@ -55,7 +55,7 @@ Examples:
 	netemera-as-api.sh refresh_token
 
 netemera-as-api.sh ${VERSION}
-Copyright (C) 2018 Netemera under MIT License. Written by Kamil Cukrowski.
+Copyright (C) 2018 Netemera under Apache License. Written by Kamil Cukrowski.
 EOF
 }
 
