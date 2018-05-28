@@ -171,6 +171,31 @@ sse_parse() {
 	local data="" events="" id=""
 	local last_event_ID_string=""
 	local reconnection_time="1000"
+	sse_parse_field_event() {
+		local field value tmp
+		local -g events data id reconnection_time
+		field=$1
+		value=$2
+		case "$field" in
+			event) events="$value"; ;;
+			data) data+="$value"$'\n'; ;;
+			id) id="$value"; ;;
+			retry)
+				tmp="$(sed 's/[0-9]//g' <<<"$value")"
+				if [ -z "$tmp" ]; then
+					# set the event stream's reconnection time to that integer.
+					log 3 "Reconnection time is not supprted"
+					reconnection_time="$value"
+				else
+					# Otherwise, ignore the field.
+					log 4 "Field 'retry' ignored cause not only ASCII digits. value='$value'"
+				fi
+				;;
+			*)
+				log 1 "Field='$field' with value='$value' is ignored."
+				;;
+		esac
+	}
 	while read line; do 
 		log 5 "sse_parse: Read line='$line'"
 		case "$line" in
@@ -210,31 +235,14 @@ sse_parse() {
 			# let field be that string.
 			field=$(sed 's/\([^:]*\):.*/\1/' <<<"$line")
 			value=$(sed 's/[^:]*:[ ]\?\(.*\)/\1/' <<<"$line")
-			;&
+			sse_parse_field_event "$field" "$value"
+			;;
 		*) 
 			# Otherwise, the string is not empty but does not contain a U+003A COLON character (:)
 			# The steps to process the field given a field name and a field value depend on the 
 			# field name, as given in the following list. Field names must be compared literally, 
 			# with no case folding performed.
-			case "$field" in
-			event) event="$value"; ;;
-			data) data+="$value"$'\n'; ;;
-			id) id="$value"; ;;
-			retry)
-				tmp="$(sed 's/[0-9]//g' <<<"$value")"
-				if [ -z "$tmp" ]; then
-					# set the event stream's reconnection time to that integer.
-					log 3 "Reconnection time is not supprted"
-					reconnection_time="$value"
-				else
-					# Otherwise, ignore the field.
-					log 4 "Field 'retry' ignored cause not only ASCII digits. value='$value'"
-				fi
-				;;
-			*)
-				log 3 "Field='$field' with value='$value' is ignored."
-				;;
-			esac
+			sse_parse_field_event "$line" ""
 			;;
 		esac
 	done
