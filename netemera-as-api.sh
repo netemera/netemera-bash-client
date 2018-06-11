@@ -59,6 +59,12 @@ Copyright (C) 2018 Netemera under Apache License. Written by Kamil Cukrowski.
 EOF
 }
 
+assert_true_or_false() {
+	case "$1" in
+	true|false) ;;
+	*) fatal "Value of $2 is not equal to 'true' or 'false'"; ;;
+	esac
+}
 usage_error() { usage >&2; echo; echo "ERROR: $@" >&2; exit 1; }
 debug() { if ${DEBUG:-false}; then echo "$@"; fi; }
 warn() { echo "WARNING:" "$@" >&2; }
