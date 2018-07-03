@@ -91,7 +91,7 @@ curl() {
 }
 
 gettoken() {
-	decalre -g outvar="$1"
+	declare -g outvar="$1"
 	declare -g TOKENFILE
 	local tmp expires_in access_token aquired_on expires_on
 	if [ -e "$TOKENFILE" ]; then
