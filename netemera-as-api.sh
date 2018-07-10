@@ -106,7 +106,7 @@ gettoken() {
 			if [ "$now" -lt "$expires_on" ]; then
 				log 2 "Token read from cache file."
 				log 3 "access_token=$access_token expires_on=$expires_on"
-				declare -g "$outvar"="$access_token"
+				eval "$outvar"="$access_token"
 				return
 			fi
 			log 2 "Token from cache file expired."
