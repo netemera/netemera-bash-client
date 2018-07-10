@@ -173,13 +173,18 @@ ask() {
 
 sse_parse() {
 	# https://www.w3.org/TR/2015/REC-eventsource-20150203/
-	local line="" field="" value=""
-	local data="" events="" id=""
+	local line=""
+	local field=""
+	local value=""
+	local data=""
+	local events=""
+	local id=""
 	local last_event_ID_string=""
 	local reconnection_time="1000"
 	sse_parse_field_event() {
-		local field value tmp
-		local -g events data id reconnection_time
+		local field
+		local value
+		local tmp
 		field=$1
 		value=$2
 		case "$field" in
@@ -231,7 +236,7 @@ sse_parse() {
 			fi
 			data="" events=""
 			;;
-		:) 
+		:*) 
 			# If the line starts with a U+003A COLON character (:)
 			# Ignore the line.
 			;;
