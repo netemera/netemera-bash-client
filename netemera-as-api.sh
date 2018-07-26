@@ -151,7 +151,7 @@ gettoken() {
 		done
 	} > "$TOKENFILE"
 	log 2 "Requesting token success. Token expires in $expires_in seconds."
-	declare -g "$outvar"="$access_token"
+	eval "$outvar"="$access_token"
 }
 
 ask() {
