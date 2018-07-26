@@ -6,7 +6,7 @@ set -euo pipefail; export SHELLOPTS
 : ${CLIENT_SECRET:=}
 : ${AUTHORIZATION_HOST:=}
 : ${APPLICATION_HOST:=}
-: ${CONFFILE:=netemera-as-api.conf}
+: ${CONFIGFILE:=${HOME:-~}/.config/netemera-as-api.conf}
 : ${LOGLVL:=2}
 : ${CURLOPTS:=}
 : ${DEBUG:=false}
@@ -38,9 +38,8 @@ Options:
 	-c   specify config file to load
 	-h   print this help and exit
 
-Configuration files:
-	/etc/${CONFFILE}
-	~/.${CONFFILE}
+Configuration file:
+	${CONFIGFILE}
 
 Configuration variables:
 	CLIENT_ID=
@@ -265,40 +264,34 @@ sse_parse() {
 
 # Main ####################################################
 
-CMDCONFFILE=""
 while getopts "vsc:h" opt; do
 	case "$opt" in
 	v) ((LOGLVL++)); ;;
 	s) ((LOGLVL--)); ;;
 	h) usage; exit; ;;
-	c) CMDCONFFILE=$OPTARG; ;;
-	*) usage; ;;
+	c) CONFIGFILE=$OPTARG; ;;
+	*) usage; exit 1; ;;
 	esac
 done
 shift $((OPTIND-1))
 
-# load configuration file
-if [ -n "$CMDCONFFILE" ]; then
-	log 3 "Loading $CMDCONFFILE"
-	. $CMDCONFFILE
-else
-	for d in /etc "$HOME/.config"; do
-		if [ -e "$d/$CONFFILE" ]; then
-			log 3 "Loading $d/$CONFFILE ..."
-			. "$d/$CONFFILE"
-		fi
-	done
-fi
-
-for i in CLIENT_ID CLIENT_SECRET AUTHORIZATION_HOST APPLICATION_HOST  TOKENFILE; do
+for i in CONFIGFILE CLIENT_ID CLIENT_SECRET AUTHORIZATION_HOST APPLICATION_HOST TOKENFILE; do
 	if eval [ -z "\"\${#$i}\"" ]; then
 		fatal "Variable $i is empty"
 	fi
 	debug "Variable $i=${!i}"
 done
 
-if [ $# -lt 1 ]; then usage; exit; fi;
-mode=$1; shift
+# load configuration file
+log 3 "Loading $CONFIGFILE"
+. $CONFIGFILE
+
+if [ $# -lt 1 ]; then
+	usage; 
+	exit;
+fi;
+mode=$1; 
+shift
 
 case "$mode" in
 application*|uplink*|downlink*)
@@ -308,6 +301,18 @@ application*|uplink*|downlink*)
 	;;
 esac
 
+mode_uplink() {
+	ask uplink-packets/end-devices/$eui \
+		-H 'Accept: text/event-stream' -H 'Cache-Control: no-cache' -m 0 --no-buffer \
+	| {
+		if ${NO_FILTER:-false}; then 
+			exec cat; 
+		else
+			sse_parse
+		fi
+	}
+}
+
 case "$mode" in
 application_uplink)
 	ask uplink-packets/applications/$eui \
@@ -315,16 +320,7 @@ application_uplink)
 	;;
 uplink|uplink_hist)
 	if [ $# -eq 1 ]; then
-		# uplink
-		ask uplink-packets/end-devices/$eui \
-			-H 'Accept: text/event-stream' -H 'Cache-Control: no-cache' -m 0 --no-buffer \
-		| {
-			if ${NO_FILTER:-false}; then 
-				exec cat; 
-			else
-				sse_parse
-			fi
-		}
+		mode_uplink
 	else
 		# old uplink_hist
 		from_time=$(date --date="$2" -u +%Y-%m-%dT%H:%M:%SZ)
@@ -341,8 +337,8 @@ uplink|uplink_hist)
 		ask "uplink-packets/end-devices/$eui?${str}" \
 		| {
 			if ${doContinue:-false}; then
-				sed 's/^\[//;s/\]$//;s/},{/},\n{/g'
-				exec "$0" uplink "$1"
+				sed 's/^\[//;s/\]$//;s/},{/},\n{/g;/^$/d'
+				mode_uplink
 			else
 				exec cat
 			fi
