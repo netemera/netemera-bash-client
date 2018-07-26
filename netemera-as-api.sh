@@ -22,9 +22,12 @@ usage() {
 Usage:
 	netemera-as-api.sh [OPTIONS] <mode> <arguments...>
 
+Connects and performs operations no netemera-as-api.
+
 Modes:
 	application_uplink <app_id>
 	uplink <dev_eui> [<from_time>] [<until_time>]
+	uplink <dev_eui> <from_time> now+
 	downlink <dev_eui> <f_port> <frm_payload> [<confirmed default:false>]
 	downlink_clear <dev_eui>
 	refresh_token
@@ -327,11 +330,23 @@ uplink|uplink_hist)
 		from_time=$(date --date="$2" -u +%Y-%m-%dT%H:%M:%SZ)
 		str="from_time=${from_time}"
 		if [ $# -ge 3 ]; then
-			until_time=$(date --date="$3" -u +%Y-%m-%dT%H:%M:%SZ)
-			str+="&until_time=${until_time}"
+			if [ "$3" = "now+" ]; then
+				doContinue=true
+			else
+				until_time=$(date --date="$3" -u +%Y-%m-%dT%H:%M:%SZ)
+				str+="&until_time=${until_time}"
+			fi
 		fi
 		if [ $# -ge 4 ]; then usage_error "Too many arguments for mode=$mode"; fi;
-		ask "uplink-packets/end-devices/$eui?${str}"
+		ask "uplink-packets/end-devices/$eui?${str}" \
+		| {
+			if ${doContinue:-false}; then
+				sed 's/^\[//;s/\]$//;s/},{/},\n{/g'
+				exec "$0" uplink "$1"
+			else
+				exec cat
+			fi
+		}
 	fi
 	;;
 downlink)
