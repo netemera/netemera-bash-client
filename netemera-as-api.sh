@@ -335,7 +335,7 @@ uplink|uplink_hist)
 	fi
 	;;
 downlink)
-	if [ $# -lt 2 ]; then usage_error "mode $mode needs more arguments"; fi;
+	if [ $# -lt 3 ]; then usage_error "mode $mode needs more arguments"; fi;
 	if (( ${#3} % 2 != 0 )); then usage_error "payload length is not dividable by 2"; fi;
 	if ! ishexstring "$3"; then usage_error "payload is not a hex string"; fi;
 	if (( $# == 4 )); then assert_true_or_false "$4" "confirmed"; fi;
