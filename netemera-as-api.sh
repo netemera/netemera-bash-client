@@ -7,7 +7,7 @@ set -euo pipefail; export SHELLOPTS
 : ${AUTHORIZATION_HOST:=}
 : ${APPLICATION_HOST:=}
 : ${CONFIGFILE:=${HOME:-~}/.config/netemera-as-api.conf}
-: ${LOGLVL:=2}
+: ${LOGLVL:=1}
 : ${CURLOPTS:=}
 : ${DEBUG:=false}
 : ${TOKENFILE:=/tmp/.$(basename $0).token}
@@ -37,6 +37,8 @@ Options:
 	-s   decrese loglevel
 	-c   specify config file to load
 	-h   print this help and exit
+	-H   only valid for uplink with history.
+             Converts outputted json array to elements separated with newlines.
 
 Configuration file:
 	${CONFIGFILE}
@@ -106,7 +108,7 @@ gettoken() {
 			local now;
 			now=$(date +%s);
 			if [ "$now" -lt "$expires_on" ]; then
-				log 2 "Token read from cache file."
+				log 1 "Token read from cache file."
 				log 3 "access_token=$access_token expires_on=$expires_on"
 				eval "$outvar"="$access_token"
 				return
@@ -152,7 +154,7 @@ gettoken() {
 			echo "$i=\"${!i}\""
 		done
 	} > "$TOKENFILE"
-	log 2 "Requesting token success. Token expires in $expires_in seconds."
+	log 1 "Requesting token success. Token expires in $expires_in seconds."
 	eval "$outvar"="$access_token"
 }
 
@@ -261,15 +263,24 @@ sse_parse() {
 	done
 }
 
+uplinkhist_json_array_to_elements() {
+	if hash jq >/dev/null; then
+		jq -cM '.[]'
+	else
+		sed 's/^\[//;s/\]$//;s/"},{/"}\n{/g'
+	fi
+}
 
 # Main ####################################################
 
-while getopts "vsc:h" opt; do
+uplinkhist_conv_json_array_to_elements=false
+while getopts "vsc:hH" opt; do
 	case "$opt" in
-	v) ((LOGLVL++)); ;;
-	s) ((LOGLVL--)); ;;
+	v) ((LOGLVL++))||:; ;;
+	s) ((LOGLVL--))||:; ;;
 	h) usage; exit; ;;
 	c) CONFIGFILE=$OPTARG; ;;
+	H) uplinkhist_conv_json_array_to_elements=true; ;;
 	*) usage; exit 1; ;;
 	esac
 done
@@ -328,6 +339,7 @@ uplink|uplink_hist)
 		if [ $# -ge 3 ]; then
 			if [ "$3" = "now+" ]; then
 				doContinue=true
+				uplinkhist_conv_json_array_to_elements=true
 			else
 				until_time=$(date --date="$3" -u +%Y-%m-%dT%H:%M:%SZ)
 				str+="&until_time=${until_time}"
@@ -336,11 +348,13 @@ uplink|uplink_hist)
 		if [ $# -ge 4 ]; then usage_error "Too many arguments for mode=$mode"; fi;
 		ask "uplink-packets/end-devices/$eui?${str}" \
 		| {
-			if ${doContinue:-false}; then
-				sed 's/^\[//;s/\]$//;s/},{/},\n{/g;/^$/d'
-				mode_uplink
+			if ${uplinkhist_conv_json_array_to_elements:-false}; then
+				uplinkhist_json_array_to_elements
 			else
-				exec cat
+				cat
+			fi
+			if ${doContinue:-false}; then
+				mode_uplink
 			fi
 		}
 	fi
