@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail; export SHELLOPTS
+set -Eeuo pipefail ; export SHELLOPTS
 
 # Environmnt variables
 : ${CLIENT_ID:=}
@@ -75,9 +75,13 @@ warn() { echo "WARNING:" "$@" >&2; }
 log() { if [ "$1" -le "${LOGLVL}" ]; then shift; echo "@" "$@" >&2; fi; }
 fatal() { echo "FATAL:" "$@" >&2; exit 1; }
 trap_err() {
-	echo "Backtrace is: " >&2; 
-	for ((i=0;1;++i));do caller "$i" >&2||break; done;
-	sed -n $(caller $((i-1))|cut -d' ' -f1)"p" $0;
+	{
+	echo "> $BASHPID backtrace is: "
+	for (( i = 0; 1; ++i)); do 
+		caller "$i" || break
+		sed -n "$(caller "$i" | cut -d' ' -f1)p" "$(which "$0")" 
+	done
+	} >&2
 }
 trap "trap_err" ERR
 
@@ -126,11 +130,11 @@ gettoken() {
 		--url "https://${AUTHORIZATION_HOST}/api/v1/oauth2/token?grant_type=client_credentials&audience=https://${APPLICATION_HOST}/api/v3" \
 		--user "${CLIENT_ID}"':'"${CLIENT_SECRET}"
 	)
-	token=$(echo "$token" \
-		| sed -n '/^{/,$p' \
-		| sed 's/^{//;s/}$//' \
-		| tr ',' '\n' \
-		| sed 's/^"\(.*\)"[[:space:]]*:[[:space:]]*\(.*\)[[:space:]]*$/\1=\2/'
+	token=$(echo "$token" |
+		sed -n '/^{/,$p' |
+		sed 's/^{//;s/}$//' |
+		tr ',' '\n' |
+		sed 's/^"\(.*\)"[[:space:]]*:[[:space:]]*\(.*\)[[:space:]]*$/\1=\2/'
 	)
 	gettoken_getvalue() { echo "$1" | grep "^$2=" | sed -n "s/^$2=//;s/^\"//;s/\"$//;p;"; }
 	if error=$(gettoken_getvalue "$token" error); then
@@ -159,7 +163,7 @@ gettoken() {
 }
 
 ask() {
-	local url token
+	local url token ret
 	url=https://"$APPLICATION_HOST"/api/v3/"$1"
 	# remove multiple ////,  but leave https://
 	url=$(sed -e 's#[/]\+#/#g' -e 's#/#//#' <<<"$url")
@@ -167,11 +171,18 @@ ask() {
 	gettoken token
 	log 3 "token_length=${#token}"
 	log 1 "Connect"
-	curl -sS \
-		-H "Authorization: Bearer ${token}" \
-		"$@" \
-		"$url" \
+
+	local cmd
+	cmd=(
+		curl -sS
+		-H "Authorization: Bearer ${token}"
+		"$@"
+		"$url"
 		${CURLOPTS}
+	)
+	log 5 "+" "$(/usr/bin/printf "%q " "${cmd[@]}")"
+	"${cmd[@]}"
+
 	echo # api/v2 does not return new line
 }
 
@@ -314,8 +325,8 @@ esac
 
 mode_uplink() {
 	ask uplink-packets/end-devices/$eui \
-		-H 'Accept: text/event-stream' -H 'Cache-Control: no-cache' -m 0 --no-buffer \
-	| {
+		-H 'Accept: text/event-stream' -H 'Cache-Control: no-cache' -m 0 --no-buffer |
+	{
 		if ${NO_FILTER:-false}; then 
 			exec cat; 
 		else
@@ -346,8 +357,8 @@ uplink|uplink_hist)
 			fi
 		fi
 		if [ $# -ge 4 ]; then usage_error "Too many arguments for mode=$mode"; fi;
-		ask "uplink-packets/end-devices/$eui?${str}" \
-		| {
+		ask "uplink-packets/end-devices/$eui?${str}" |
+		{
 			if ${uplinkhist_conv_json_array_to_elements:-false}; then
 				uplinkhist_json_array_to_elements
 			else
@@ -367,6 +378,9 @@ downlink)
 	req="{\"dev_eui\":\"$1\",\"f_port\":$2,\"frm_payload\":\"$3\",\"confirmed\":${4-false}}"
 	log 1 "> Request: $req" >&2
 	ask downlink-packets/end-devices/$1 --data-raw "$req" -H "Content-Type: application/json"
+	;;
+downlink_clear)
+	ask end-devices/$1//queued-downlink-packets -X DELETE
 	;;
 refresh_token)
 	if [ -e "$TOKENFILE" ]; then
