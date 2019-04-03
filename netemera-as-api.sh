@@ -1,18 +1,15 @@
 #!/bin/bash
-set -Eeuo pipefail ; export SHELLOPTS
+set -Eeuo pipefail
+export SHELLOPTS
 
 # Environmnt variables
 : ${CLIENT_ID:=}
 : ${CLIENT_SECRET:=}
-: ${AUTHORIZATION_HOST:=}
-: ${APPLICATION_HOST:=}
 : ${CONFIGFILE:=${HOME:-~}/.config/netemera-as-api.conf}
 : ${LOGLVL:=1}
-: ${CURLOPTS:=}
 : ${DEBUG:=false}
 : ${TOKENFILE:=/tmp/.$(basename $0).token}
-: ${NO_FILTER:=false}
-VERSION=v0.1.0
+VERSION=v0.1.1
 if $DEBUG; then set -x; fi;
 
 # Functions ###################################################
@@ -25,11 +22,9 @@ Usage:
 Connects and performs operations no netemera-as-api.
 
 Modes:
-	application_uplink <app_id>
-	uplink <dev_eui> [<from_time>] [<until_time>]
-	uplink <dev_eui> <from_time> now+
-	downlink <dev_eui> <f_port> <frm_payload> [<confirmed default:false>]
-	downlink_clear <dev_eui>
+	uplink <deveui> [since] [until]
+	downlink <deveui> <port> <payload> [<confirmed default:false>]
+	downlink_clear <deveui>
 	refresh_token
 
 Options:
@@ -37,17 +32,13 @@ Options:
 	-s   decrese loglevel
 	-c   specify config file to load
 	-h   print this help and exit
-	-H   only valid for uplink with history.
-             Converts outputted json array to elements separated with newlines.
+	-S   filter SSE stream
+	-N   Output nice formatted separated output
 
-Configuration file:
-	${CONFIGFILE}
-
-Configuration variables:
-	CLIENT_ID=
-	CLIENT_SECRET=
-	AUTHORIZATION_HOST=
-	APPLICATION_HOST=
+Environment variables:
+	CONFIGFILE=${CONFIGFILE}
+	CLIENT_ID=<private>
+	CLIENT_SECRET=<private>
 	LOGLVL=${LOGLVL}
 	TOKENFILE=${TOKENFILE}
 
@@ -59,7 +50,7 @@ Examples:
 	netemera-as-api.sh refresh_token
 
 netemera-as-api.sh ${VERSION}
-Copyright (C) 2018 Netemera under Apache License. Written by Kamil Cukrowski.
+Copyright (C) 2019 Netemera under Apache License. Written by Kamil Cukrowski.
 EOF
 }
 
@@ -76,14 +67,15 @@ log() { if [ "$1" -le "${LOGLVL}" ]; then shift; echo "@" "$@" >&2; fi; }
 fatal() { echo "FATAL:" "$@" >&2; exit 1; }
 trap_err() {
 	{
-	echo "> $BASHPID backtrace is: "
-	for (( i = 0; 1; ++i)); do 
-		caller "$i" || break
-		sed -n "$(caller "$i" | cut -d' ' -f1)p" "$(which "$0")" 
-	done
+		echo
+		echo "ERROR $BASHPID backtrace:"
+		for (( i = 0; 1; ++i)); do 
+			caller "$i" || break
+			sed -n "$(caller "$i" | cut -d' ' -f1)p" "$(which "$0")" 
+		done
 	} >&2
 }
-trap "trap_err" ERR
+trap "trap_err $?" ERR
 
 tolower() { echo "$@" | tr '[:upper:]' '[:lower:]'; }
 
@@ -94,7 +86,7 @@ ishexstring() {
 }
 
 curl() {
-	log 10 curl "$@";
+	log 5 "$(/bin/printf "%q " curl "$@"; echo)";
 	command curl "$@";
 }
 
@@ -102,41 +94,41 @@ gettoken() {
 	declare -g outvar="$1"
 	declare -g TOKENFILE
 	local tmp expires_in access_token aquired_on expires_on
+
 	if [ -e "$TOKENFILE" ]; then
-		tmp=$(cat "$TOKENFILE" | sed 's/^\([^=]*\)=.*/\1/')
-		if ! local $tmp; then
-			log 2 "error reading variable names from TOKENFILE=$TOKENFILE"
-			rm "$TOKENFILE"
-		else
-			. "$TOKENFILE"
-			local now;
-			now=$(date +%s);
-			if [ "$now" -lt "$expires_on" ]; then
-				log 1 "Token read from cache file."
-				log 3 "access_token=$access_token expires_on=$expires_on"
-				eval "$outvar"="$access_token"
-				return
-			fi
-			log 2 "Token from cache file expired."
-			log 3 "Token $expires_on $now $aquired_on"
-			rm "$TOKENFILE"
+		. "$TOKENFILE"
+		local now;
+		now=$(date +%s);
+		if [ "$now" -lt "$expires_on" ]; then
+			log 1 "Token read from cache file."
+			log 3 "access_token=$access_token expires_on=$expires_on"
+			eval "$outvar"="$access_token"
+			return
 		fi
+		log 2 "Token from cache file expired."
+		log 3 "Token $expires_on $now $aquired_on"
+		rm "$TOKENFILE"
 	fi
 
 	log 2 "Requesting token..."
 	token=$(
-		curl -sS \
-		--request POST \
-		--url "https://${AUTHORIZATION_HOST}/api/v1/oauth2/token?grant_type=client_credentials&audience=https://${APPLICATION_HOST}/api/v3" \
-		--user "${CLIENT_ID}"':'"${CLIENT_SECRET}"
+		curl \
+			-sS \
+  			--request POST \
+  			--url 'https://authorization.netemera.com/api/v2/oauth2/token' \
+			--user "${CLIENT_ID}"':'"${CLIENT_SECRET}" \
+  			--data 'grant_type=client_credentials&audience=https://application.lorawan.netemera.com/api/v4'
 	)
-	token=$(echo "$token" |
-		sed -n '/^{/,$p' |
-		sed 's/^{//;s/}$//' |
-		tr ',' '\n' |
-		sed 's/^"\(.*\)"[[:space:]]*:[[:space:]]*\(.*\)[[:space:]]*$/\1=\2/'
-	)
-	gettoken_getvalue() { echo "$1" | grep "^$2=" | sed -n "s/^$2=//;s/^\"//;s/\"$//;p;"; }
+
+	gettoken_getvalue() { 
+		local ret
+		ret=$(printf "%s\n" "$1" | jq -r ".$2");
+		if [ "$ret" = "null" ]; then
+			return 1
+		fi
+		printf "%s\n" "$ret"
+	}
+
 	if error=$(gettoken_getvalue "$token" error); then
 		if error_desc=$(gettoken_getvalue "$token" error_description); then
 			fatal "Getting token from server failed with description:"$'\n'"$error_desc"
@@ -150,154 +142,53 @@ gettoken() {
 	if ! access_token=$(gettoken_getvalue "$token" access_token); then
 		fatal "error getting field access_token in received token $token"
 	fi
+
 	aquired_on=$(date +%s)
-	expires_on=$(date --date="+ $expires_in seconds" +%s)
-	{
-		echo "$token"
-		for i in aquired_on expires_on; do
-			echo "$i=\"${!i}\""
-		done
-	} > "$TOKENFILE"
+	expires_on=$(( aquired_on + $expires_in ))
+	declare -p access_token expires_in aquired_on expires_on > "$TOKENFILE"
+
 	log 1 "Requesting token success. Token expires in $expires_in seconds."
 	eval "$outvar"="$access_token"
 }
 
 ask() {
-	local url token ret
-	url=https://"$APPLICATION_HOST"/api/v3/"$1"
-	# remove multiple ////,  but leave https://
-	url=$(sed -e 's#[/]\+#/#g' -e 's#/#//#' <<<"$url")
-	shift
 	gettoken token
-	log 3 "token_length=${#token}"
 	log 1 "Connect"
 
-	local cmd
-	cmd=(
-		curl -sS
-		-H "Authorization: Bearer ${token}"
-		"$@"
-		"$url"
-		${CURLOPTS}
-	)
-	log 5 "+" "$(/usr/bin/printf "%q " "${cmd[@]}")"
-	"${cmd[@]}"
-
-	echo # api/v2 does not return new line
+	local url 
+	url="$1"
+	shift
+	curl \
+  		-sS \
+		-H "Authorization: Bearer ${token}" \
+  		--url "https://application.lorawan.netemera.com/api/v4/$url" \
+  		"$@"
+  	echo
 }
 
-sse_parse() {
-	# https://www.w3.org/TR/2015/REC-eventsource-20150203/
-	local line=""
-	local field=""
-	local value=""
-	local data=""
-	local events=""
-	local id=""
-	local last_event_ID_string=""
-	local reconnection_time="1000"
-	sse_parse_field_event() {
-		local field
-		local value
-		local tmp
-		field=$1
-		value=$2
-		case "$field" in
-			event) events="$value"; ;;
-			data) data+="$value"$'\n'; ;;
-			id) id="$value"; ;;
-			retry)
-				tmp="$(sed 's/[0-9]//g' <<<"$value")"
-				if [ -z "$tmp" ]; then
-					# set the event stream's reconnection time to that integer.
-					log 3 "Reconnection time is not supprted"
-					reconnection_time="$value"
-				else
-					# Otherwise, ignore the field.
-					log 4 "Field 'retry' ignored cause not only ASCII digits. value='$value'"
-				fi
-				;;
-			*)
-				log 1 "Field='$field' with value='$value' is ignored."
-				;;
-		esac
-	}
-	while read line; do 
-		log 5 "sse_parse: Read line='$line'"
-		case "$line" in
-		"@"*)
-			# lines starting with @ are logs in our program
-			echo "$line"
-			;;
-		"")
-			# If the line is empty (a blank line)
-			# Dispat-ech the event, as defined below.
-			# 1. Set the last event ID string of the event source to value of the last event ID
-			# buffer
-			last_event_ID_string="$id"
-			# 2. If the data buffer is an empty string, set the data buffer and the event type 
-			# buffer to the empty string and abort these steps.
-			if [ -n "$data" ]; then
-				# 3. If the data buffer's last character is a U+000A LINE FEED (LF) character, then 
-				# remove the last character from the data buffer.
-				if [ "${data: -1}" == $'\n' ]; then
-					data="${data::-1}"
-				fi
-				# 4. Create an event that us...
-				# 5. type not supported
-				echo "$data" | sed -e '/^$/d'
-				# 6. Set the data buffer and the event type buffer to the empty string.
-				id=""
-			fi
-			data="" events=""
-			;;
-		:*) 
-			# If the line starts with a U+003A COLON character (:)
-			# Ignore the line.
-			;;
-		*:*)
-			# If the line contains a U+003A COLON character (:)
-			# Collect the characters on the line before the first U+003A COLON character (:), and 
-			# let field be that string.
-			field=$(sed 's/\([^:]*\):.*/\1/' <<<"$line")
-			value=$(sed 's/[^:]*:[ ]\?\(.*\)/\1/' <<<"$line")
-			sse_parse_field_event "$field" "$value"
-			;;
-		*) 
-			# Otherwise, the string is not empty but does not contain a U+003A COLON character (:)
-			# The steps to process the field given a field name and a field value depend on the 
-			# field name, as given in the following list. Field names must be compared literally, 
-			# with no case folding performed.
-			sse_parse_field_event "$line" ""
-			;;
-		esac
-	done
-}
-
-uplinkhist_json_array_to_elements() {
-	if hash jq >/dev/null; then
-		jq -cM '.[]'
-	else
-		sed 's/^\[//;s/\]$//;s/"},{/"}\n{/g'
-	fi
+date_iso_8601() {
+	# 2019-04-02T00:00:00.000Z
+	date -u --date="$1" +%Y-%m-%dT%H:%M:%SZ
 }
 
 # Main ####################################################
 
-uplinkhist_conv_json_array_to_elements=false
-while getopts "vsc:hH" opt; do
+NICE_OUTPUT=false
+NICE_COLUMN_OUTPUT=false
+while getopts "vsc:hHN" opt; do
 	case "$opt" in
 	v) ((LOGLVL++))||:; ;;
 	s) ((LOGLVL--))||:; ;;
 	h) usage; exit; ;;
 	c) CONFIGFILE=$OPTARG; ;;
-	H) uplinkhist_conv_json_array_to_elements=true; ;;
-	*) usage; exit 1; ;;
+	H) NICE_OUTPUT=true; ;;
+	N) NICE_COLUMN_OUTPUT=true; ;;
+	*) usage_error "Argument '$opt' is invalid"; exit 1; ;;
 	esac
 done
 shift $((OPTIND-1))
 
-for i in CONFIGFILE CLIENT_ID CLIENT_SECRET AUTHORIZATION_HOST APPLICATION_HOST TOKENFILE; do
+for i in CONFIGFILE CLIENT_ID CLIENT_SECRET CONFIGFILE TOKENFILE; do
 	if eval [ -z "\"\${#$i}\"" ]; then
 		fatal "Variable $i is empty"
 	fi
@@ -316,71 +207,58 @@ mode=$1;
 shift
 
 case "$mode" in
-application*|uplink*|downlink*)
+uplink*|downlink*)
 	if [ $# -lt 1 ]; then usage_error "mode='$mode' needs argument."; fi
 	eui=$(tolower $1)
 	if ! ishexstring "$eui"; then fatal "eui='$eui' is not a hex string."; fi;
 	;;
 esac
 
-mode_uplink() {
-	ask uplink-packets/end-devices/$eui \
-		-H 'Accept: text/event-stream' -H 'Cache-Control: no-cache' -m 0 --no-buffer |
-	{
-		if ${NO_FILTER:-false}; then 
-			exec cat; 
-		else
-			sse_parse
-		fi
-	}
-}
-
 case "$mode" in
-application_uplink)
-	ask uplink-packets/applications/$eui \
-		-H 'Accept: text/event-stream' -H 'Cache-Control: no-cache' -m 0
-	;;
-uplink|uplink_hist)
-	if [ $# -eq 1 ]; then
-		mode_uplink
-	else
-		# old uplink_hist
-		from_time=$(date --date="$2" -u +%Y-%m-%dT%H:%M:%SZ)
-		str="from_time=${from_time}"
-		if [ $# -ge 3 ]; then
-			if [ "$3" = "now+" ]; then
-				doContinue=true
-				uplinkhist_conv_json_array_to_elements=true
-			else
-				until_time=$(date --date="$3" -u +%Y-%m-%dT%H:%M:%SZ)
-				str+="&until_time=${until_time}"
-			fi
+uplink)
+	if [ "$#" -eq 1 ]; then
+		args="filter[follow]=true"
+	elif [ "$#" -eq 2 ]; then
+		if ! tmp1=$(date_iso_8601 "$2"); then
+			error "The argument $2 is an invalid date"
 		fi
-		if [ $# -ge 4 ]; then usage_error "Too many arguments for mode=$mode"; fi;
-		ask "uplink-packets/end-devices/$eui?${str}" |
-		{
-			if ${uplinkhist_conv_json_array_to_elements:-false}; then
-				uplinkhist_json_array_to_elements
-			else
-				cat
-			fi
-			if ${doContinue:-false}; then
-				mode_uplink
-			fi
-		}
+		args="filter[since]=$tmp1&filter[follow]=true"
+	elif [ "$#" -eq 3 ]; then
+		if ! tmp1=$(date_iso_8601 "$2"); then
+			error "The argument $2 is an invalid date"
+		fi
+		if ! tmp2=$(date_iso_8601 "$3"); then
+			error "The argument $3 is an invalid date"
+		fi
+		args="filter[since]=$tmp1&filter[until]=$tmp2"
+	else
+		usage_error "Too many arguments"
+	fi
+
+	ask "uplink-packets/end-devices/$eui?$args" -H 'Accept: text/event-stream' -H 'Cache-Control: no-cache' -m 0 --no-buffer |
+	if "$NICE_OUTPUT"; then
+		grep --line-buffered --extended-regexp '^data:.+' | cut -d: -f2- |
+		if "$NICE_COLUMN_OUTPUT"; then
+			jq -c -r '[ .recvTime, .devEui, "port=", .fPort, "fCntUp=", .fCntUp, "ack=", .ack, "adr=", .adr, "DR=", .dataRate, .ulFreq, .frmPayload ] | join(" ")'
+		else
+			jq --unbuffered -c .
+		fi
+	else
+		cat
 	fi
 	;;
 downlink)
-	if [ $# -lt 3 ]; then usage_error "mode $mode needs more arguments"; fi;
+	if [ "$#" -lt 3 ]; then usage_error "mode $mode needs more arguments"; fi;
 	if (( ${#3} % 2 != 0 )); then usage_error "payload length is not dividable by 2"; fi;
 	if ! ishexstring "$3"; then usage_error "payload is not a hex string"; fi;
 	if (( $# == 4 )); then assert_true_or_false "$4" "confirmed"; fi;
-	req="{\"dev_eui\":\"$1\",\"f_port\":$2,\"frm_payload\":\"$3\",\"confirmed\":${4-false}}"
+	req=$(printf '{"data":{"type":"downlink-packet","attributes":{"fPort":%d,"confirmed":%s,"frmPayload":"%s"}}}' "$2" "${4:-false}" "$3")
 	log 1 "> Request: $req" >&2
-	ask downlink-packets/end-devices/$1 --data-raw "$req" -H "Content-Type: application/json"
+	ask downlink-packets/end-devices/$1 -H "Content-Type: application/json" --data-raw "$req"
 	;;
 downlink_clear)
-	ask end-devices/$1//queued-downlink-packets -X DELETE
+	echo "NOT IMPLEMENTED"
+	exit 1
 	;;
 refresh_token)
 	if [ -e "$TOKENFILE" ]; then
