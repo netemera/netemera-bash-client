@@ -237,9 +237,9 @@ uplink)
 
 	ask "uplink-packets/end-devices/$eui?$args" -H 'Accept: text/event-stream' -H 'Cache-Control: no-cache' -m 0 --no-buffer |
 	if "$NICE_OUTPUT"; then
-		grep --line-buffered --extended-regexp '^data:.+' | cut -d: -f2- |
+		grep --line-buffered --extended-regexp '^data:.+' | stdbuf -oL cut -d: -f2- |
 		if "$NICE_COLUMN_OUTPUT"; then
-			jq -c -r '[ .recvTime, .devEui, "port=", .fPort, "fCntUp=", .fCntUp, "ack=", .ack, "adr=", .adr, "DR=", .dataRate, .ulFreq, .frmPayload ] | join(" ")'
+			jq --unbuffered -c -r '[ .recvTime, .devEui, "port=", .fPort, "fCntUp=", .fCntUp, "ack=", .ack, "adr=", .adr, "DR=", .dataRate, .ulFreq, .frmPayload ] | join(" ")'
 		else
 			jq --unbuffered -c .
 		fi
