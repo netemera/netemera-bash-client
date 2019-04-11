@@ -117,7 +117,7 @@ gettoken() {
   			--request POST \
   			--url 'https://authorization.netemera.com/api/v2/oauth2/token' \
 			--user "${CLIENT_ID}"':'"${CLIENT_SECRET}" \
-  			--data 'grant_type=client_credentials&audience=https://application.lorawan.netemera.com/api/v4'
+  			--data 'grant_type=client_credentials&audience=https://network.netemera.com/api/v4'
 	)
 
 	gettoken_getvalue() { 
@@ -161,7 +161,7 @@ ask() {
 	curl \
   		-sS \
 		-H "Authorization: Bearer ${token}" \
-  		--url "https://application.lorawan.netemera.com/api/v4/$url" \
+  		--url "https://network.netemera.com/api/v4/$url" \
   		"$@"
   	echo
 }
