@@ -32,8 +32,8 @@ Options:
 	-s   decrese loglevel
 	-c   specify config file to load
 	-h   print this help and exit
-	-S   filter SSE stream
-	-N   Output nice formatted separated output
+	-H   Filter SSE statements (only valid with uplink mode)
+	-B   Output bash-parsable space separated output (only valid with uplnk mode)
 
 Environment variables:
 	CONFIGFILE=${CONFIGFILE}
@@ -173,16 +173,16 @@ date_iso_8601() {
 
 # Main ####################################################
 
-NICE_OUTPUT=false
-NICE_COLUMN_OUTPUT=false
-while getopts "vsc:hHN" opt; do
+FILTER_SSE=false
+SPACE_SEPARATED_OUTPUT=false
+while getopts "vsc:hHB" opt; do
 	case "$opt" in
 	v) ((LOGLVL++))||:; ;;
 	s) ((LOGLVL--))||:; ;;
 	h) usage; exit; ;;
 	c) CONFIGFILE=$OPTARG; ;;
-	H) NICE_OUTPUT=true; ;;
-	N) NICE_COLUMN_OUTPUT=true; ;;
+	H) FILTER_SSE=true; ;;
+	B) FILTER_SSE=true; SPACE_SEPARATED_OUTPUT=true; ;;
 	*) usage_error "Argument '$opt' is invalid"; exit 1; ;;
 	esac
 done
@@ -236,10 +236,15 @@ uplink)
 	fi
 
 	ask "uplink-packets/end-devices/$eui?$args" -H 'Accept: text/event-stream' -H 'Cache-Control: no-cache' -m 0 --no-buffer |
-	if "$NICE_OUTPUT"; then
+	if "$FILTER_SSE"; then
 		grep --line-buffered --extended-regexp '^data:.+' | stdbuf -oL cut -d: -f2- |
-		if "$NICE_COLUMN_OUTPUT"; then
-			jq --unbuffered -c -r '[ .recvTime, .devEui, "port=", .fPort, "fCntUp=", .fCntUp, "ack=", .ack, "adr=", .adr, "DR=", .dataRate, .ulFreq, .frmPayload ] | join(" ")'
+		if "$SPACE_SEPARATED_OUTPUT"; then
+			{
+				printf "recvTime devEui fPort fCntUp ack adr dataRate ulFreq frmPayload\n"
+				jq --unbuffered -c -r '[ .recvTime, .devEui, .fPort, .fCntUp, .ack, .adr, .dataRate, .ulFreq, .frmPayload ] | join(" ")'
+			} |
+			sed -u -e 's/ false/ 0/g' -e 's/ true/ 1/g' |
+			xargs -l printf "%24s %16s %3s %5s ack:%1s adr:%1s dr:%1s f:%5s %s\n"
 		else
 			jq --unbuffered -c .
 		fi
