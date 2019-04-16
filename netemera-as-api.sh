@@ -54,17 +54,55 @@ Copyright (C) 2019 Netemera under Apache License. Written by Kamil Cukrowski.
 EOF
 }
 
+usage_error() {
+	{
+		usage
+		echo 
+		error "$@"
+	} >&2
+	exit 1
+}
+
+# logging utilities ##################################################
+
+error() {
+	echo "ERR " "$@"
+}
+
+debug() {
+	if ! ${DEBUG:-false}; then return; fi;
+	echo "DBG " "$@"
+}
+
+warn() {
+	echo "WARN" "$@" >&2
+}
+
+fatal() {
+	echo "FATAL" "$@" >&2
+	exit 1
+}
+
+log() {
+	if [ "$1" -le "${LOGLVL}" ]; then
+		local lvl
+		lvl="$1"
+		shift
+		echo "LOG$lvl" "$@" >&2
+	fi
+}
+
+# utilities #########################################################
+
 assert_true_or_false() {
 	case "$1" in
 	true|false) ;;
 	*) fatal "Value of $2 is not equal to 'true' or 'false'"; ;;
 	esac
 }
-usage_error() { usage >&2; echo; echo "ERROR: $@" >&2; exit 1; }
-debug() { if ${DEBUG:-false}; then echo "$@"; fi; }
-warn() { echo "WARNING:" "$@" >&2; }
-log() { if [ "$1" -le "${LOGLVL}" ]; then shift; echo "@" "$@" >&2; fi; }
-fatal() { echo "FATAL:" "$@" >&2; exit 1; }
+
+# Print trap trace on error.
+# Meant to be registered to trap
 trap_err() {
 	{
 		echo
@@ -75,9 +113,11 @@ trap_err() {
 		done
 	} >&2
 }
-trap "trap_err $?" ERR
 
-tolower() { echo "$@" | tr '[:upper:]' '[:lower:]'; }
+tolower() {
+	printf "%s" "$@" | 
+	tr '[:upper:]' '[:lower:]'
+}
 
 ishexstring() {
 	local tmp
@@ -90,28 +130,46 @@ curl() {
 	command curl "$@";
 }
 
+date_iso_8601() {
+	# 2019-04-02T00:00:00.000Z
+	date -u --date="$1" +%Y-%m-%dT%H:%M:%SZ
+}
+
+# functions ##################################################################################
+
+# Get's the access_token from the server and saves it into first vairable
 gettoken() {
-	declare -g outvar="$1"
 	declare -g TOKENFILE
-	local tmp expires_in access_token aquired_on expires_on
+	local outvar
+	outvar="$1"
 
 	if [ -e "$TOKENFILE" ]; then
-		. "$TOKENFILE"
+
+		if ! source "$TOKENFILE"; then
+			fatal "Parsing $TOKENFILE"
+		fi
+
 		local now;
 		now=$(date +%s);
+
 		if [ "$now" -lt "$expires_on" ]; then
 			log 1 "Token read from cache file."
 			log 3 "access_token=$access_token expires_on=$expires_on"
-			eval "$outvar"="$access_token"
+			declare -g "$outvar"="$access_token"
 			return
 		fi
+
 		log 2 "Token from cache file expired."
 		log 3 "Token $expires_on $now $aquired_on"
 		rm "$TOKENFILE"
 	fi
 
+	local aquired_on
+	aquired_on=$(date +%s)
+
 	log 2 "Requesting token..."
-	token=$(
+	local resp
+	resp=$(
 		curl \
 			-sS \
   			--request POST \
@@ -120,35 +178,22 @@ gettoken() {
   			--data 'grant_type=client_credentials&audience=https://network.netemera.com/api/v4'
 	)
 
-	gettoken_getvalue() { 
-		local ret
-		ret=$(printf "%s\n" "$1" | jq -r ".$2");
-		if [ "$ret" = "null" ]; then
-			return 1
-		fi
-		printf "%s\n" "$ret"
-	}
-
-	if error=$(gettoken_getvalue "$token" error); then
-		if error_desc=$(gettoken_getvalue "$token" error_description); then
-			fatal "Getting token from server failed with description:"$'\n'"$error_desc"
-		else
-			fatal "Getting token from server failed. Server returned no description."
-		fi
-	fi
-	if ! expires_in=$(gettoken_getvalue "$token" expires_in); then
-		fatal "expires_in field is missing in aquired token $token"
-	fi
-	if ! access_token=$(gettoken_getvalue "$token" access_token); then
-		fatal "error getting field access_token in received token $token"
+	local resp2
+	local access_token token_type expires_in refresh_token empty
+	if 
+		! resp2=$(<<<"$resp" jq -r '.access_token, .token_type, .expires_in, .refresh_token') ||
+		! IFS=$'\n' read -d '' -r access_token token_type expires_in refresh_token empty < <(printf "%s\0" "$resp2") ||
+		[ -z "$access_token" -o -z "$token_type" -o -z "$expires_in" -o -z "$refresh_token" -o -n "$empty" ]
+	then
+		fatal "Could not parse token"$'\n'"$resp"
 	fi
 
-	aquired_on=$(date +%s)
+	local expires_on
 	expires_on=$(( aquired_on + $expires_in ))
-	declare -p access_token expires_in aquired_on expires_on > "$TOKENFILE"
+	declare -p access_token expires_in aquired_on expires_on refresh_token > "$TOKENFILE"
 
 	log 1 "Requesting token success. Token expires in $expires_in seconds."
-	eval "$outvar"="$access_token"
+	declare -g "$outvar"="$access_token"
 }
 
 ask() {
@@ -159,63 +204,16 @@ ask() {
 	url="$1"
 	shift
 	curl \
-  		-sS \
+  		-sSN \
 		-H "Authorization: Bearer ${token}" \
   		--url "https://network.netemera.com/api/v4/$url" \
   		"$@"
   	echo
 }
 
-date_iso_8601() {
-	# 2019-04-02T00:00:00.000Z
-	date -u --date="$1" +%Y-%m-%dT%H:%M:%SZ
-}
+args_parse_timeregion() {
+	local args tmp1 tmp2
 
-# Main ####################################################
-
-FILTER_SSE=false
-SPACE_SEPARATED_OUTPUT=false
-while getopts "vsc:hHB" opt; do
-	case "$opt" in
-	v) ((LOGLVL++))||:; ;;
-	s) ((LOGLVL--))||:; ;;
-	h) usage; exit; ;;
-	c) CONFIGFILE=$OPTARG; ;;
-	H) FILTER_SSE=true; ;;
-	B) FILTER_SSE=true; SPACE_SEPARATED_OUTPUT=true; ;;
-	*) usage_error "Argument '$opt' is invalid"; exit 1; ;;
-	esac
-done
-shift $((OPTIND-1))
-
-for i in CONFIGFILE CLIENT_ID CLIENT_SECRET CONFIGFILE TOKENFILE; do
-	if eval [ -z "\"\${#$i}\"" ]; then
-		fatal "Variable $i is empty"
-	fi
-	debug "Variable $i=${!i}"
-done
-
-# load configuration file
-log 3 "Loading $CONFIGFILE"
-. $CONFIGFILE
-
-if [ $# -lt 1 ]; then
-	usage; 
-	exit;
-fi;
-mode=$1; 
-shift
-
-case "$mode" in
-uplink*|downlink*)
-	if [ $# -lt 1 ]; then usage_error "mode='$mode' needs argument."; fi
-	eui=$(tolower $1)
-	if ! ishexstring "$eui"; then fatal "eui='$eui' is not a hex string."; fi;
-	;;
-esac
-
-case "$mode" in
-uplink)
 	if [ "$#" -eq 1 ]; then
 		args="filter[follow]=true"
 	elif [ "$#" -eq 2 ]; then
@@ -235,39 +233,180 @@ uplink)
 		usage_error "Too many arguments"
 	fi
 
+	printf "%s\n" "$args"
+}
+
+# modes ######################################################################################
+
+mode_uplink() {
+	declare -g FILTER_SSE SPACE_SEPARATED_OUTPUT
+
+	if [ "$#" -lt 1 -o "$#" -gt 3 ]; then
+		usage_error "uplink: wrong number of arguments"
+	fi
+
+	local eui
+	eui=$(tolower "$1")
+
+	local args
+	args=$(args_parse_timeregion "${@:1:3}")
+
 	ask "uplink-packets/end-devices/$eui?$args" -H 'Accept: text/event-stream' -H 'Cache-Control: no-cache' -m 0 --no-buffer |
 	if "$FILTER_SSE"; then
 		grep --line-buffered --extended-regexp '^data:.+' | stdbuf -oL cut -d: -f2- |
 		if "$SPACE_SEPARATED_OUTPUT"; then
-			printf "recvTime devEui fPort fCntUp ack adr dataRate ulFreq frmPayload\n"
-			jq --unbuffered -c -r '[ .recvTime, .devEui, .fPort, .fCntUp, .ack, .adr, .dataRate, .ulFreq, .frmPayload ] | join(" ")' |
-			sed -u -e 's/ false/ 0/g' -e 's/ true/ 1/g' |
-			xargs -l printf "%24s %16s %3s %5s ack:%1s adr:%1s dr:%1s f:%5s %s\n"
+			# printf "recvTime devEui fPort fCntUp ack adr dataRate ulFreq frmPayload\n"
+			jq --unbuffered -c -r '.recvTime, .devEui, .fPort, .fCntUp, .ack, .adr, .dataRate, .ulFreq, .frmPayload' |
+			sed -u -e 's/^false$/0/' -e 's/^true$/1/g' |
+			xargs -n9 printf "%24s %16s %3s %5s ack:%1s adr:%1s dr:%1s f:%5s %s\n"
 		else
-			jq --unbuffered -c .
+			jq -C --unbuffered -c .
 		fi
 	else
 		cat
 	fi
-	;;
-downlink)
+}
+
+mode_get_downlink() {
+	declare -g FILTER_SSE SPACE_SEPARATED_OUTPUT
+
+	if [ "$#" -lt 1 -o "$#" -gt 3 ]; then
+		usage_error "get_downlink: wrong number of arguments"
+	fi
+
+	local eui
+	eui=$(tolower "$1")
+
+	local args
+	args=$(args_parse_timeregion "${@:1:3}")
+
+	ask downlink-packets/end-devices/"$eui?$args" -H 'Accept: text/event-stream' -H 'Cache-Control: no-cache' |
+	if "$FILTER_SSE"; then
+		grep --line-buffered --extended-regexp '^data:.+' | stdbuf -oL cut -d: -f2- |
+		if "$SPACE_SEPARATED_OUTPUT"; then
+			# printf "recvTime devEui fPort confirmed frmPayload\n"
+			jq --unbuffered -c -r '.recvTime, .devEui, .fPort, .confirmed, .frmPayload' |
+			xargs -n5 printf "%24s %16s %3s %5s %s\n"
+		else
+			jq -C --unbuffered -c .
+		fi
+	else
+		cat
+	fi
+}
+
+mode_downlink() {
+	if [ "$#" -lt 1 -o "$#" -gt 4 ]; then
+		usage_error "downlink: wrong number of arguments"
+	fi
+
+	local eui
+	eui=$(tolower "$1")
+
 	if [ "$#" -lt 3 ]; then usage_error "mode $mode needs more arguments"; fi;
 	if (( ${#3} % 2 != 0 )); then usage_error "payload length is not dividable by 2"; fi;
 	if ! ishexstring "$3"; then usage_error "payload is not a hex string"; fi;
 	if (( $# == 4 )); then assert_true_or_false "$4" "confirmed"; fi;
 	req=$(printf '{"data":{"type":"downlink-packet","attributes":{"fPort":%d,"confirmed":%s,"frmPayload":"%s"}}}' "$2" "${4:-false}" "$3")
 	log 1 "> Request: $req" >&2
-	ask downlink-packets/end-devices/$1 -H "Content-Type: application/json" --data-raw "$req"
+	ask downlink-packets/end-devices/"$eui" -H "Content-Type: application/json" --data-raw "$req"
+}
+
+mode_get_bothlinks() {
+	if [ "$#" -lt 1 -o "$#" -gt 3 ]; then
+		usage_error "get_downlink: wrong number of arguments"
+	fi
+
+	local childs
+	childs=()
+
+	trapf() {
+		if [ ${#childs[@]} -ne 0 ]; then
+			kill -s "$1" "${childs[@]}"
+		fi
+	}
+
+	trap 'trapf EXIT' EXIT
+
+	mode_uplink "$@" | sed -u 's/^/  up /' &
+	childs+=("$!")
+
+	mode_get_downlink "$@" | sed -u 's/^/down /' &
+	childs+=("$!")
+
+	wait "${childs[@]}"
+}
+
+mode_refresh_token() {
+	if [ "$#" -ne 0 ]; then
+		usage_error "refresh_token takes no arguments"
+	fi
+
+	if [ -e "$TOKENFILE" ]; then
+		rm "$TOKENFILE"
+	fi
+
+	gettoken _
+}
+
+# Main ####################################################
+
+trap "trap_err $?" ERR
+
+FILTER_SSE=false
+SPACE_SEPARATED_OUTPUT=false
+
+while getopts "dvsc:hHB" opt; do
+	case "$opt" in
+	d) LOGLVL=100; DEBUG=true; ;;
+	v) ((LOGLVL++))||:; ;;
+	s) ((LOGLVL--))||:; ;;
+	h) usage; exit; ;;
+	c) CONFIGFILE=$OPTARG; ;;
+	H) FILTER_SSE=true; ;;
+	B) FILTER_SSE=true; SPACE_SEPARATED_OUTPUT=true; ;;
+	*) usage_error "Argument '$opt' is invalid"; exit 1; ;;
+	esac
+done
+shift $((OPTIND-1))
+
+if [ $# -lt 1 ]; then
+	usage; 
+	exit;
+fi;
+mode=$1; 
+shift
+
+# load configuration file
+log 3 "Loading $CONFIGFILE"
+. $CONFIGFILE
+
+for i in CONFIGFILE CLIENT_ID CLIENT_SECRET CONFIGFILE TOKENFILE; do
+	debug "Variable $i=${!i}"
+	if [ -z "${!i}" ]; then
+		fatal "Variable $i is empty"
+	fi
+done
+
+case "$mode" in
+uplink)
+	mode_uplink "$@"
+	;;
+downlink)
+	mode_downlink "$@"
+	;;
+get_downlink)
+	mode_get_downlink "$@"
+	;;
+get_bothlinks)
+	mode_get_bothlinks "$@"
 	;;
 downlink_clear)
 	echo "NOT IMPLEMENTED"
 	exit 1
 	;;
 refresh_token)
-	if [ -e "$TOKENFILE" ]; then
-		rm "$TOKENFILE"
-	fi
-	gettoken _
+	mode_refresh_token "$@"
 	;;
 *)
 	usage_error "Unknown mode"
