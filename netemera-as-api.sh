@@ -239,10 +239,8 @@ uplink)
 	if "$FILTER_SSE"; then
 		grep --line-buffered --extended-regexp '^data:.+' | stdbuf -oL cut -d: -f2- |
 		if "$SPACE_SEPARATED_OUTPUT"; then
-			{
-				printf "recvTime devEui fPort fCntUp ack adr dataRate ulFreq frmPayload\n"
-				jq --unbuffered -c -r '[ .recvTime, .devEui, .fPort, .fCntUp, .ack, .adr, .dataRate, .ulFreq, .frmPayload ] | join(" ")'
-			} |
+			printf "recvTime devEui fPort fCntUp ack adr dataRate ulFreq frmPayload\n"
+			jq --unbuffered -c -r '[ .recvTime, .devEui, .fPort, .fCntUp, .ack, .adr, .dataRate, .ulFreq, .frmPayload ] | join(" ")' |
 			sed -u -e 's/ false/ 0/g' -e 's/ true/ 1/g' |
 			xargs -l printf "%24s %16s %3s %5s ack:%1s adr:%1s dr:%1s f:%5s %s\n"
 		else
