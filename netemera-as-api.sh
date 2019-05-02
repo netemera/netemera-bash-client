@@ -258,7 +258,7 @@ mode_uplink() {
 			# printf "recvTime devEui fPort fCntUp ack adr dataRate ulFreq frmPayload\n"
 			jq --unbuffered -c -r '.recvTime, .devEui, .fPort, .fCntUp, .ack, .adr, .dataRate, .ulFreq, .frmPayload' |
 			sed -u -e 's/^false$/0/' -e 's/^true$/1/g' |
-			xargs -n9 printf "%24s %16s %3s %5s ack:%1s adr:%1s dr:%1s f:%5s %s\n"
+			xargs -n9 printf "%24s %16s %3s %5s ack:%1s adr:%1s dr:%1s f:%03.1f %s\n"
 		else
 			jq -C --unbuffered -c .
 		fi
