@@ -138,20 +138,39 @@ date_iso_8601() {
 # functions ##################################################################################
 
 # Get's the access_token from the server and saves it into first vairable
-gettoken() {
+_gettoken() {
 	declare -g TOKENFILE
 	local outvar
 	outvar="$1"
 
-	if [ -e "$TOKENFILE" ]; then
+	if [ ! -e "$TOKENFILE" ]; then
+		: > "$TOKENFILE"
+	fi
 
-		if ! source "$TOKENFILE"; then
-			fatal "Parsing $TOKENFILE"
+	local access_token expires_in aquired_on expires_on refresh_token
+	unset access_token expires_in aquired_on expires_on refresh_token
+
+	if ! source "$TOKENFILE"; then
+		fatal "Parsing $TOKENFILE"
+	fi
+
+	local now;
+	now=$(date +%s);
+
+	local valid_tokenfile
+	valid_tokenfile=true
+	for i in access_token expires_in aquired_on expires_on refresh_token; do
+		if [ -z ${!i+x} ]; then
+			valid_tokenfile=false
+			break
 		fi
+	done
 
-		local now;
-		now=$(date +%s);
+	if "$valid_tokenfile"; then
+		log 3 "Valid tokenfile read and found!"
 
+		local now
+		now=$(date +%s)
 		if [ "$now" -lt "$expires_on" ]; then
 			log 1 "Token read from cache file."
 			log 3 "access_token=$access_token expires_on=$expires_on"
@@ -161,7 +180,7 @@ gettoken() {
 
 		log 2 "Token from cache file expired."
 		log 3 "Token $expires_on $now $aquired_on"
-		rm "$TOKENFILE"
+		: > "$TOKENFILE"
 	fi
 
 	local aquired_on
@@ -194,6 +213,18 @@ gettoken() {
 
 	log 1 "Requesting token success. Token expires in $expires_in seconds."
 	declare -g "$outvar"="$access_token"
+}
+
+gettoken() {
+	declare -g TOKENFILE
+	local lockfd
+	exec {lockfd}>"$TOKENFILE.lock"
+	if ! timeout 3 flock "$lockfd"; then
+		echo "Waiting for lock on $(readlink -f "$0") file..."
+		flock "$lockfd"
+	fi
+	_gettoken "$@"
+	flock -u "$lockfd"
 }
 
 ask() {
@@ -342,9 +373,7 @@ mode_refresh_token() {
 		usage_error "refresh_token takes no arguments"
 	fi
 
-	if [ -e "$TOKENFILE" ]; then
-		rm "$TOKENFILE"
-	fi
+	: > "$TOKENFILE"
 
 	gettoken _
 }
