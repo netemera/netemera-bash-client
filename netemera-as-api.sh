@@ -126,8 +126,8 @@ ishexstring() {
 }
 
 curl() {
-	log 5 "$( IFS=' '; printf "curl %s\n" "$*"; )";
-	command curl "$@";
+	log 5 "$( IFS=' '; printf "curl -g %q\n" "$*"; )";
+	command curl -g "$@";
 }
 
 date_iso_8601() {
