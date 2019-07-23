@@ -126,7 +126,7 @@ ishexstring() {
 }
 
 curl() {
-	log 5 "$(/bin/printf "%q " curl "$@"; echo)";
+	log 5 "$( IFS=' '; printf "curl %s\n" "$*"; )";
 	command curl "$@";
 }
 
