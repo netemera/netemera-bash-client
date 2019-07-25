@@ -5,11 +5,11 @@ export SHELLOPTS
 # Environmnt variables
 : ${CLIENT_ID:=}
 : ${CLIENT_SECRET:=}
-: ${CONFIGFILE:=${HOME:-~}/.config/netemera-as-api.conf}
+: ${CONFIGFILE:=$HOME/.config/netemera-as-api.conf}
 : ${LOGLVL:=1}
 : ${DEBUG:=false}
-: ${TOKENFILE:=/tmp/.$(basename $0).token}
-VERSION=v0.1.1
+: ${TOKENFILE:="/tmp/.$(basename $0)-$(whoami).token"}
+VERSION=v0.1.2
 if $DEBUG; then set -x; fi;
 
 # Functions ###################################################
@@ -22,18 +22,41 @@ Usage:
 Connects and performs operations no netemera-as-api.
 
 Modes:
-	uplink <deveui> [since] [until]
-	downlink <deveui> <port> <payload> [<confirmed default:false>]
-	downlink_clear <deveui>
-	refresh_token
+
+  uplink <deveui> [since] [until]
+    Prints uplink from specified dev eui within specified time.
+    You may need to specify '--' to separate arguments from since and until strings
+    If until is empty, by default it will follow the output
+
+  downlink <deveui> <port> <payload> [<confirmed default:false>]
+    Sends a single downlink to specified device
+    Port is an decimal integer in base 10
+    Payload is a string of bytes in hex
+    Confirmed should be the string "false" or "true"
+
+  get_downlink <deveui> [since] [until]
+    Query downlink requested from network server to send to device.
+    Arguments are similar to uplink mode.
+
+  get_bothlinks <deveui> [since] [until]
+    Query both downlink and uplinks from a device.
+    Arguments are similar to uplink mode.
+
+  downlink_clear <deveui>
+    Clear downlinks queried on network server to device.
+
+  refresh_token
+    Refresh token stored in TOKENFILE
 
 Options:
-	-v   increase loglevel
-	-s   decrese loglevel
-	-c   specify config file to load
-	-h   print this help and exit
-	-H   Filter SSE statements (only valid with uplink mode)
-	-B   Output bash-parsable space separated output (only valid with uplnk mode)
+  -v                     Increase loglevel
+  -s                     Decrese loglevel
+  -c --config=STR        Specify config file to load
+  -H --format-filtersse  Only filter SSE statements (only valid with *link mode)
+  -B --format-space      Output bash-parsable space separated output (only valid with *link mode)
+  -h --human-readable    Output human readable format (only valid with *link mode)
+  -N --disable-sorting   Disable sorting the output of get_bothlinks. Only valid for this mode.
+     --help              Print this help and exit
 
 Environment variables:
 	CONFIGFILE=${CONFIGFILE}
@@ -43,11 +66,13 @@ Environment variables:
 	TOKENFILE=${TOKENFILE}
 
 Examples:
-	netemera-as-api.sh uplink ffffffffff00001b
-	netemera-as-api.sh uplink ffffffffff000014 -7day
-	netemera-as-api.sh uplink ffffffffff000014 -7day -1day
-	netemera-as-api.sh downlink ffffffffff00001b 1 0101
-	netemera-as-api.sh refresh_token
+	netemera-as-api.sh -- uplink ffffffffff00001b
+	netemera-as-api.sh -- uplink ffffffffff000014 -7day
+	netemera-as-api.sh -- uplink ffffffffff000014 -7day -1day
+	netemera-as-api.sh -- downlink ffffffffff00001b 1 0101
+	netemera-as-api.sh -- refresh_token
+	netemera-as-api.sh -sB -- get_bothlinks ffffffffff00001b -1day now
+	netemera-as-api.sh -sh -- get_bothlinks ffffffffff00001b -1hour
 
 netemera-as-api.sh ${VERSION}
 Copyright (C) 2019 Netemera under Apache License. Written by Kamil Cukrowski.
@@ -125,14 +150,14 @@ ishexstring() {
 	return "${#tmp}"
 }
 
-curl() {
+runcurl() {
 	log 5 "$( IFS=' '; printf "curl -g %q\n" "$*"; )";
-	command curl -g "$@";
+	curl -g "$@";
 }
 
 date_iso_8601() {
 	# 2019-04-02T00:00:00.000Z
-	date -u --date="$1" +%Y-%m-%dT%H:%M:%SZ
+	date -u --date="$1" +%Y-%m-%dT%H:%M:%S.%3NZ
 }
 
 # functions ##################################################################################
@@ -189,7 +214,7 @@ _gettoken() {
 	log 2 "Requesting token..."
 	local resp
 	resp=$(
-		curl \
+		runcurl \
 			-sS \
   			--request POST \
   			--url 'https://authorization.netemera.com/api/v2/oauth2/token' \
@@ -234,7 +259,7 @@ ask() {
 	local url 
 	url="$1"
 	shift
-	curl \
+	runcurl \
   		-sSN \
 		-H "Authorization: Bearer ${token}" \
   		--url "https://network.netemera.com/api/v4/$url" \
@@ -267,10 +292,15 @@ args_parse_timeregion() {
 	printf "%s\n" "$args"
 }
 
+# If the stdin are SSE lines, we filter only the data: lines
+func_format_filtersse() {
+	grep --line-buffered --extended-regexp '^data:.+' | stdbuf -oL cut -d: -f2-
+}
+
 # modes ######################################################################################
 
 mode_uplink() {
-	declare -g FILTER_SSE SPACE_SEPARATED_OUTPUT
+	declare -g output_format
 
 	if [ "$#" -lt 1 -o "$#" -gt 3 ]; then
 		usage_error "uplink: wrong number of arguments"
@@ -283,23 +313,37 @@ mode_uplink() {
 	args=$(args_parse_timeregion "${@:1:3}")
 
 	ask "uplink-packets/end-devices/$eui?$args" -H 'Accept: text/event-stream' -H 'Cache-Control: no-cache' -m 0 --no-buffer |
-	if "$FILTER_SSE"; then
-		grep --line-buffered --extended-regexp '^data:.+' | stdbuf -oL cut -d: -f2- |
-		if "$SPACE_SEPARATED_OUTPUT"; then
+	case "$output_format" in
+	format_space|format_human_readable|format_filtersse)
+		func_format_filtersse |
+		case "$output_format" in
+		format_space|format_human_readable)
 			# printf "recvTime devEui fPort fCntUp ack adr dataRate ulFreq frmPayload\n"
 			jq --unbuffered -c -r '.recvTime, .devEui, .fPort, .fCntUp, .ack, .adr, .dataRate, .ulFreq, .frmPayload' |
 			sed -u -e 's/^false$/0/' -e 's/^true$/1/g' |
-			xargs -n9 printf "%24s %16s %3s %5s ack:%1s adr:%1s dr:%1s f:%03.1f %s\n"
-		else
+			case "$output_format" in
+			format_space)
+				xargs -n9 printf "%-24s %16s %3s %5s ack:%1s adr:%1s dr:%1s f:%03.1f %s\n"
+				;;
+			format_human_readable)
+				xargs -n9 printf "%-24s deveui:%16s port:%-3s upcnt:%-5s ack:%1s adr:%1s dr:%1s freq:%03.1f payload:%s\n"
+				;;
+			*) fatal "" ;;
+			esac
+			;;
+		format_filtersse)
 			jq -C --unbuffered -c .
-		fi
-	else
-		cat
-	fi
+			;;
+		*) fatal ""; ;;
+		esac
+		;;
+	"format_none") cat; ;;
+	*) fatal ""; ;;
+	esac
 }
 
 mode_get_downlink() {
-	declare -g FILTER_SSE SPACE_SEPARATED_OUTPUT
+	declare -g output_format
 
 	if [ "$#" -lt 1 -o "$#" -gt 3 ]; then
 		usage_error "get_downlink: wrong number of arguments"
@@ -312,18 +356,33 @@ mode_get_downlink() {
 	args=$(args_parse_timeregion "${@:1:3}")
 
 	ask downlink-packets/end-devices/"$eui?$args" -H 'Accept: text/event-stream' -H 'Cache-Control: no-cache' |
-	if "$FILTER_SSE"; then
-		grep --line-buffered --extended-regexp '^data:.+' | stdbuf -oL cut -d: -f2- |
-		if "$SPACE_SEPARATED_OUTPUT"; then
-			# printf "recvTime devEui fPort confirmed frmPayload\n"
+	case "$output_format" in
+	format_filtersse|format_space|format_human_readable)
+		# from the raw curl input stream filter the data: lines
+		func_format_filtersse |
+		case "$output_format" in
+		format_space|format_human_readable)
+			# extract only the fields we are interested in
 			jq --unbuffered -c -r '.recvTime, .devEui, .fPort, .confirmed, .frmPayload' |
-			xargs -n5 printf "%24s %16s %3s %5s %s\n"
-		else
+			case "$output_format" in
+			format_space)
+				xargs -n5 printf "%-24s %16s %3s %5s %s\n"
+				;;
+			format_human_readable)
+				xargs -n5 printf "%-24s deveui:%16s port:%-3s confirmed:%-5s payload:%s\n"
+				;;
+			*) fatal ""; ;;
+			esac
+			;;
+		format_filtersse)
 			jq -C --unbuffered -c .
-		fi
-	else
-		cat
-	fi
+			;;
+		*) fatal ""; ;;
+		esac
+		;;
+	"format_none") cat; ;;
+	*) fatal ""; ;;
+	esac
 }
 
 mode_downlink() {
@@ -344,28 +403,123 @@ mode_downlink() {
 }
 
 mode_get_bothlinks() {
+	declare -g get_bothlinks_disable_sorting
+
 	if [ "$#" -lt 1 -o "$#" -gt 3 ]; then
-		usage_error "get_downlink: wrong number of arguments"
+		usage_error "get_bothlinks: wrong number of arguments"
 	fi
 
-	local childs
+	set -m
+
+	# global, so that trap_exit can touch it
+	declare -a -g childs
 	childs=()
 
-	trapf() {
-		if [ ${#childs[@]} -ne 0 ]; then
-			kill -s "$1" "${childs[@]}"
-		fi
+	declare -a -g fifo
+	fifo=$(mktemp -u)
+	mkfifo "$fifo"
+
+	# redirect a file descriptor, so system can buffer the output
+	# without it curl may exit prematurely
+	exec 10<>"$fifo"
+
+	killtree() { 
+    	for p in $(pstree -p "$1" | grep -o "([[:digit:]]*)" |grep -o "[[:digit:]]*" | tac | grep -v "$1"); do
+        	kill "$p" || :
+    	done
 	}
 
-	trap 'trapf EXIT' EXIT
+	trap_exit() {
+		set +E
+		set +e
+		set +u
+		set +o pipefail
+		declare -g childs fifo
 
-	mode_uplink "$@" | sed -u 's/^/  up /' &
+		echo "Exiting..." >&2
+
+		# I don't care who you are and what you do.
+		# I have a prticular set of skill.
+		# I will find you. And I will kill you.
+		killtree "$BASHPID" || :
+		killtree "$$" || :
+
+		# different ways of killing all the childs
+		[ "${#childs[@]}" -ne 0 ] && kill -s 9 "${childs[@]}" || :
+		tmp=$(ps -s $BASHPID -o pid=) || :
+		[ -n "$tmp" ] && kill -s 9 $tmp || :
+		pkill -P $BASHPID -s 9 || :
+
+		sleep 0.1
+		kill $(jobs -p) || :
+		wait "${childs[@]}" "$tmp" || :
+		wait || :
+
+		exec 10<&- || :
+		rm -f -r "$fifo" || :
+	}
+
+	trap 'trap_exit EXIT' EXIT
+
+	# start uplink in background. Append the lines with something
+	mode_uplink "$@" | sed -u 's/^/  UP /' >&10 &
 	childs+=("$!")
+	sleep 0.1
+	if ! kill -s 0 "${childs[-1]}" 2>/dev/null; then
+		fatal "Problem running uplink mode!"
+	fi
 
-	mode_get_downlink "$@" | sed -u 's/^/down /' &
+	# start downlink in background. Append the lines with something
+	mode_get_downlink "$@" | sed -u 's/^/DOWN /' >&10 &
 	childs+=("$!")
+	sleep 0.1
+	if ! kill -s 0 "${childs[-1]}" 2>/dev/null; then
+		fatal "Problem running downlink mode!"
+	fi
 
-	wait "${childs[@]}"
+	if [ "$get_bothlinks_disable_sorting" != "true" ]; then
+		# ok, now sort the lines that were queried in the history using datestamps
+		{
+			# give them some time to get up
+			timeout 1 cat <&10 || :
+			# query the lines until no lines are available within timeout
+			while IFS= read -t 0.1 line; do
+				printf "%s\n" "$line"
+			done <&10
+		} |
+		# extract the time and put it as the first field in line
+		sed -E '
+			# hold the line
+			h
+			# extract only the time part
+			s/.... ([^ ]*) .*/\1/
+			# remove any nonnumbers
+			s/[^0-9]*//g
+			# sometimes lines are missing the subseconds field, ie. 
+			# look like this:              2019-07-25T10:11:55Z
+			# inseat of looking like this: 2019-07-25T10:11:55.665Z
+			# this will screw sorting, so add zeros on the end
+			s/^[0-9]{14}$/&000/
+			# now all the lines have to have exactly 17 [0-9] characters!
+			/^[0-9]{17}$/!{
+				G
+				s/.*/-1 Sed internal failure! The line is: &/
+				q 1
+			}
+			# append grab the hold space
+			G
+			# replace the newline with a space
+			s/\n/ /
+		' |
+		# sort via first field only - save speed
+		# disable last sort - save speed
+		sort -t' ' -s -n -k1.1 |
+		# lastly remove the sorting field
+		cut -d' ' -f2-
+	fi
+
+	# query the events from the fifo
+	cat <&10
 }
 
 mode_refresh_token() {
@@ -382,26 +536,33 @@ mode_refresh_token() {
 
 trap "trap_err $?" ERR
 
-FILTER_SSE=false
-SPACE_SEPARATED_OUTPUT=false
-
-while getopts "dvsc:hHB" opt; do
-	case "$opt" in
-	d) LOGLVL=100; DEBUG=true; ;;
-	v) ((LOGLVL++))||:; ;;
-	s) ((LOGLVL--))||:; ;;
-	h) usage; exit; ;;
-	c) CONFIGFILE=$OPTARG; ;;
-	H) FILTER_SSE=true; ;;
-	B) FILTER_SSE=true; SPACE_SEPARATED_OUTPUT=true; ;;
-	*) usage_error "Argument '$opt' is invalid"; exit 1; ;;
+args=$(getopt \
+	-n netemera-as-api.sh  \
+	-o dvschHB \
+	-l help,config:,human-readable,filter-sse \
+	-- "$@")
+eval set -- "$args"
+output_format="format_none"
+get_bothlinks_disable_sorting=false
+while (($#)); do
+	case "$1" in
+	-d) LOGLVL=100; DEBUG=true; ;;
+	-v) ((LOGLVL++))||:; ;;
+	-s) ((LOGLVL--))||:; ;;
+	--help) usage; exit; ;;
+	-c|--config) CONFIGFILE=$2; shift; ;;
+	-H|--format-filtersse) output_format="format_filtersse"; ;;
+	-B|--format-space) output_format="format_space"; ;;
+	-h|--human-redable) output_format="format_human_readable"; ;;
+	-N|--disable-sorting) get_bothlinks_disable_sorting=true; ;;
+	*) shift; break;
 	esac
+	shift
 done
-shift $((OPTIND-1))
 
 if [ $# -lt 1 ]; then
 	usage; 
-	exit;
+	exit 1;
 fi;
 mode=$1; 
 shift
@@ -417,25 +578,17 @@ for i in CONFIGFILE CLIENT_ID CLIENT_SECRET CONFIGFILE TOKENFILE; do
 	fi
 done
 
+case "$output_format" in 
+"format_none"|"format_filtersse"|"format_space"|"format_human_readable") ;;
+*) fatal "$output_format is invalid $output_format"; ;;
+esac
+
 case "$mode" in
-uplink)
-	mode_uplink "$@"
-	;;
-downlink)
-	mode_downlink "$@"
-	;;
-get_downlink)
-	mode_get_downlink "$@"
-	;;
-get_bothlinks)
-	mode_get_bothlinks "$@"
+uplink|downlink|get_downlink|get_bothlinks|refresh_token)
+	mode_"$mode" "$@"
 	;;
 downlink_clear)
-	echo "NOT IMPLEMENTED"
-	exit 1
-	;;
-refresh_token)
-	mode_refresh_token "$@"
+	fatal "NOT IMPLEMENTED YET"
 	;;
 *)
 	usage_error "Unknown mode"
